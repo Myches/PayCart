@@ -1,0 +1,75 @@
+name: Deploy Everything
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'What to deploy'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - backend-only
+          - frontend-only
+
+env:
+  AWS_REGION: us-east-1
+  LAMBDA_FUNCTION: paycart-api
+  NODE_VERSION: '20'
+
+jobs:
+  deploy-backend:
+    name: Deploy Backend
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.target == 'all' || github.event.inputs.target == 'backend-only' }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: npm ci
+      - run: npm run build
+      - run: zip -r function.zip dist/ node_modules/ package.json
+      - run: aws lambda update-function-code --function-name ${{ env.LAMBDA_FUNCTION }} --zip-file fileb://function.zip --region ${{ env.AWS_REGION }}
+      - run: aws lambda wait function-updated --function-name ${{ env.LAMBDA_FUNCTION }} --region ${{ env.AWS_REGION }}
+      - run: echo "✅ Backend deployed"
+
+  deploy-frontend:
+    name: Deploy Frontend
+    runs-on: ubuntu-latest
+    needs: deploy-backend
+    if: ${{ always() && (github.event.inputs.target == 'all' || github.event.inputs.target == 'frontend-only') }}
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: npm ci
+      - name: Build
+        env:
+          NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
+        run: npm run build
+      - run: aws s3 sync out/ s3://${{ secrets.S3_BUCKET }} --delete --region ${{ env.AWS_REGION }}
+      - run: aws cloudfront create-invalidation --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} --paths "/*"
+      - run: echo "✅ Frontend deployed — https://${{ secrets.CLOUDFRONT_DOMAIN }}"
