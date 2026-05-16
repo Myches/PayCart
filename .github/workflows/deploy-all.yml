@@ -28,21 +28,79 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
           cache-dependency-path: backend/package-lock.json
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-      - run: npm ci --omit=dev
-      - run: npm run build
-      - run: zip -r function.zip dist/ package.json package-lock.json
-      - run: aws lambda update-function-code --function-name ${{ env.LAMBDA_FUNCTION }} --zip-file fileb://function.zip --region ${{ env.AWS_REGION }}
-      - run: aws lambda wait function-updated --function-name ${{ env.LAMBDA_FUNCTION }} --region ${{ env.AWS_REGION }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build & Bundle with esbuild
+        run: |
+          npx esbuild src/index.ts \
+            --bundle \
+            --platform=node \
+            --target=node20 \
+            --outfile=dist/index.js \
+            --minify \
+            --external:@aws-sdk/*
+
+      - name: Create deployment package
+        run: zip function.zip dist/index.js
+
+      - name: Check zip size
+        run: |
+          ZIPPED_MB=$(du -sm function.zip | cut -f1)
+          echo "Zipped size:   ${ZIPPED_MB} MB"
+
+          UNZIPPED_BYTES=$(unzip -l function.zip | tail -1 | awk '{print $1}')
+          UNZIPPED_MB=$(( UNZIPPED_BYTES / 1024 / 1024 ))
+          echo "Unzipped size: ${UNZIPPED_MB} MB"
+
+          if [ "$UNZIPPED_MB" -gt 250 ]; then
+            echo "❌ Unzipped size ${UNZIPPED_MB} MB exceeds Lambda's 250 MB hard limit."
+            exit 1
+          fi
+
+          if [ "$ZIPPED_MB" -gt 50 ]; then
+            echo "USE_S3=true" >> $GITHUB_ENV
+          else
+            echo "USE_S3=false" >> $GITHUB_ENV
+          fi
+
+      - name: Upload via S3 (over 50 MB)
+        if: env.USE_S3 == 'true'
+        run: |
+          aws s3 cp function.zip s3://${{ secrets.S3_BUCKET }}/lambda/function.zip
+          aws lambda update-function-code \
+            --function-name ${{ env.LAMBDA_FUNCTION }} \
+            --s3-bucket ${{ secrets.S3_BUCKET }} \
+            --s3-key lambda/function.zip \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Upload directly (under 50 MB)
+        if: env.USE_S3 == 'false'
+        run: |
+          aws lambda update-function-code \
+            --function-name ${{ env.LAMBDA_FUNCTION }} \
+            --zip-file fileb://function.zip \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Wait for Lambda update
+        run: |
+          aws lambda wait function-updated \
+            --function-name ${{ env.LAMBDA_FUNCTION }} \
+            --region ${{ env.AWS_REGION }}
+
       - run: echo "✅ Backend deployed"
 
   deploy-frontend:
@@ -55,21 +113,39 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+
       - run: npm ci
+
       - name: Build
         env:
           NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
         run: npm run build
-      - run: aws s3 sync out/ s3://${{ secrets.S3_BUCKET }} --delete --region ${{ env.AWS_REGION }}
+
+      - run: |
+          aws s3 sync out/ s3://${{ secrets.S3_BUCKET }} \
+            --delete \
+            --region ${{ env.AWS_REGION }} \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "*.html"
+
+          aws s3 sync out/ s3://${{ secrets.S3_BUCKET }} \
+            --region ${{ env.AWS_REGION }} \
+            --cache-control "no-cache, no-store, must-revalidate" \
+            --include "*.html" \
+            --exclude "*"
+
       - run: aws cloudfront create-invalidation --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} --paths "/*"
+
       - run: echo "✅ Frontend deployed — https://${{ secrets.CLOUDFRONT_DOMAIN }}"

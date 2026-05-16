@@ -6,7 +6,7 @@ on:
     paths:
       - 'backend/**'
       - '.github/workflows/deploy-backend.yml'
-  workflow_dispatch: # allow manual trigger
+  workflow_dispatch:
 
 env:
   AWS_REGION: us-east-1
@@ -63,31 +63,49 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Install dependencies
-        run: npm ci --omit=dev
+        # Install all deps (including devDeps) so esbuild can bundle everything
+        run: npm ci
 
-      - name: Build TypeScript
-        run: npm run build
+      - name: Build & Bundle with esbuild
+        run: |
+          npx esbuild src/index.ts \
+            --bundle \
+            --platform=node \
+            --target=node20 \
+            --outfile=dist/index.js \
+            --minify \
+            --external:@aws-sdk/*
+          # ↑ @aws-sdk/* is pre-installed in the Lambda Node 20 runtime — no need to ship it.
+          # Add any other native/optional externals here, e.g.: --external:sharp
 
       - name: Create deployment package
-        run: |
-          zip -r function.zip dist/ package.json -x "node_modules/*"
-          mkdir -p node_modules_prod
-          npm ci --omit=dev --prefix . --save-prefix="" 2>/dev/null || true
-          zip -r function.zip node_modules_prod/
-       
+        run: zip function.zip dist/index.js
 
       - name: Check zip size
         run: |
-          SIZE=$(du -sm function.zip | cut -f1)
-          echo "Package size: ${SIZE}MB"
-          if [ $SIZE -gt 50 ]; then
-            echo "⚠️ Package is over 50MB — uploading via S3"
+          # Compressed size (Lambda direct-upload limit: 50 MB)
+          ZIPPED_MB=$(du -sm function.zip | cut -f1)
+          echo "Zipped size:   ${ZIPPED_MB} MB"
+
+          # Unzipped size (Lambda hard limit: 250 MB)
+          UNZIPPED_BYTES=$(unzip -l function.zip | tail -1 | awk '{print $1}')
+          UNZIPPED_MB=$(( UNZIPPED_BYTES / 1024 / 1024 ))
+          echo "Unzipped size: ${UNZIPPED_MB} MB"
+
+          if [ "$UNZIPPED_MB" -gt 250 ]; then
+            echo "❌ Unzipped size ${UNZIPPED_MB} MB exceeds Lambda's 250 MB hard limit."
+            echo "Add more --external flags to esbuild or split the function."
+            exit 1
+          fi
+
+          if [ "$ZIPPED_MB" -gt 50 ]; then
+            echo "⚠️  Zipped package is over 50 MB — will upload via S3"
             echo "USE_S3=true" >> $GITHUB_ENV
           else
             echo "USE_S3=false" >> $GITHUB_ENV
           fi
 
-      - name: Upload via S3 (if over 50MB)
+      - name: Upload via S3 (over 50 MB)
         if: env.USE_S3 == 'true'
         run: |
           aws s3 cp function.zip s3://${{ secrets.S3_BUCKET }}/lambda/function.zip
@@ -97,7 +115,7 @@ jobs:
             --s3-key lambda/function.zip \
             --region ${{ env.AWS_REGION }}
 
-      - name: Upload directly (under 50MB)
+      - name: Upload directly (under 50 MB)
         if: env.USE_S3 == 'false'
         run: |
           aws lambda update-function-code \
