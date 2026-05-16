@@ -69,7 +69,12 @@ jobs:
         run: npm run build
 
       - name: Create deployment package
-        run: npm prune --omit=dev && zip -r function.zip dist/ node_modules/ package.json package-lock.json
+        run: |
+          zip -r function.zip dist/ package.json -x "node_modules/*"
+          mkdir -p node_modules_prod
+          npm ci --omit=dev --prefix . --save-prefix="" 2>/dev/null || true
+          zip -r function.zip node_modules_prod/
+       
 
       - name: Check zip size
         run: |
