@@ -40,7 +40,7 @@ psql -U postgres -d paycart -f database/seed.sql
 
 ```bash
 cd backend
-cp .env.example .env          # Fill in your local DB password + JWT secret
+cp .env.example .env          # Edit file and fill in your values
 npm install
 npm run dev                    # Runs on http://localhost:4000
 ```
@@ -51,7 +51,7 @@ Test: `curl http://localhost:4000/api/health`
 
 ```bash
 cd frontend
-cp .env.example .env.local     # NEXT_PUBLIC_API_URL=http://localhost:4000/api
+cp .env.example .env     # Edit file and fill in your values
 npm install
 npm run dev                    # Runs on http://localhost:3000
 ```
@@ -163,3 +163,5 @@ aws s3 sync out/ s3://paycart-frontend-YOUR_ACCOUNT --delete
 | S3 | 5 GB storage | Frontend static files |
 | CloudFront | 1 TB transfer/mo | CDN for frontend |
 | CloudWatch | 10 metrics/mo | Monitoring |
+
+Full Documentation Link : https://drive.google.com/file/d/14saASo1MQfju_X5x3SL36dnV9RHfPxto/view?usp=sharing
